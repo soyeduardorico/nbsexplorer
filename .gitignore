@@ -1,0 +1,17 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.vscode/
+
+nbs-run-*/
+nbs-plan.json
+connection-results/
+
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
