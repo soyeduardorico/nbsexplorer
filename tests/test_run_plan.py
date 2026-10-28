@@ -171,6 +171,44 @@ def test_web_analysis_requires_a_reviewed_plan():
     assert not any(getattr(r, "path", None) == "/api/layers" for r in web.app.routes)
 
 
+def test_web_conversation_endpoint_passes_context_and_summary_flag(monkeypatch):
+    seen = []
+
+    def reply(messages, summarize=False):
+        seen.append((messages, summarize))
+        return "Screening brief"
+
+    monkeypatch.setattr(web, "reply_to_issue_conversation", reply)
+    request = web.ConversationRequest(messages=[
+        {"role": "user", "content": "Explore woodland restoration."},
+        {"role": "assistant", "content": "What is the goal?"},
+        {"role": "user", "content": "Improve connectivity."},
+    ], summarize=True)
+    assert web.conversation(request) == {"reply": "Screening brief"}
+    assert seen == [([
+        {"role": "user", "content": "Explore woodland restoration."},
+        {"role": "assistant", "content": "What is the goal?"},
+        {"role": "user", "content": "Improve connectivity."},
+    ], True)]
+
+
+@pytest.mark.parametrize("messages,summarize", [
+    ([], False),
+    ([{"role": "user", "content": "   "}], False),
+    ([{"role": "system", "content": "Not accepted"}], False),
+    ([{"role": "assistant", "content": "Reply"}], False),
+    ([{"role": "assistant", "content": "Reply"}], True),
+    ([
+        {"role": "user", "content": "First"},
+        {"role": "user", "content": "Second"},
+    ], False),
+    ([{"role": "user", "content": "x" * 30001}], True),
+])
+def test_web_conversation_rejects_invalid_context(messages, summarize):
+    with pytest.raises(ValidationError):
+        web.ConversationRequest(messages=messages, summarize=summarize)
+
+
 @pytest.mark.parametrize("updates", [
     {"brief": " "}, {"east": -5}, {"start_date": "invalid"},
     {"start_date": "2026-02-01", "end_date": "2026-01-01"},

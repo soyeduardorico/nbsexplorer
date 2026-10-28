@@ -1,5 +1,6 @@
 from copy import deepcopy
 import json
+import os
 
 import pytest
 from pydantic import ValidationError
@@ -73,6 +74,24 @@ def test_catalogue_matches_builders():
     assert LAYER_CATALOGUE.keys() == LAYERS.keys()
 
 
+def test_local_env_file_loads_and_does_not_override_process_environment(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GEMINI_API_KEY=local-key\nBRAVE_SEARCH_API_KEY=brave-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+
+    planner.config.load_local_env(env_file)
+
+    assert os.environ["GEMINI_API_KEY"] == "local-key"
+    assert os.environ["BRAVE_SEARCH_API_KEY"] == "brave-key"
+    monkeypatch.setenv("GEMINI_API_KEY", "process-key")
+    planner.config.load_local_env(env_file)
+    assert os.environ["GEMINI_API_KEY"] == "process-key"
+
+
 def test_valid_plan_and_gemini_request(gemini):
     plan, model = planner.generate_plan("Cold slope, little light")
     assert model == "gemini-3.1-flash-lite"
@@ -93,6 +112,36 @@ def test_valid_plan_and_gemini_request(gemini):
                  "full physical domain", "not a user_requirement"):
         assert text in prompt
     assert gemini["closed"]
+
+
+def test_issue_conversation_keeps_prior_turns_and_returns_reply(gemini):
+    gemini["content"] = "What location and habitat constraints should we consider?"
+    reply = planner.reply_to_issue_conversation([
+        {"role": "user", "content": "I want to explore woodland restoration."},
+        {"role": "assistant", "content": "What is the main goal?"},
+        {"role": "user", "content": "Improve connectivity between habitats."},
+    ])
+    assert reply == gemini["content"]
+    payload = gemini["requests"][0]
+    contents = payload["contents"]
+    assert [turn["role"] for turn in contents] == ["user", "model", "user"]
+    assert contents[0]["parts"][0]["text"] == "I want to explore woodland restoration."
+    assert "earlier messages as context" in payload["systemInstruction"]["parts"][0]["text"]
+    assert payload["generationConfig"]["maxOutputTokens"] == 1024
+
+
+def test_issue_conversation_summary_uses_all_turns_and_summary_instruction(gemini):
+    gemini["content"] = "Explore woodland restoration to improve habitat connectivity."
+    summary = planner.reply_to_issue_conversation([
+        {"role": "user", "content": "I want to explore woodland restoration."},
+        {"role": "assistant", "content": "What is your goal?"},
+        {"role": "user", "content": "Improve habitat connectivity."},
+    ], summarize=True)
+    assert summary == gemini["content"]
+    payload = gemini["requests"][0]
+    assert payload["contents"][-1]["role"] == "user"
+    assert "Summarize our discussion" in payload["contents"][-1]["parts"][0]["text"]
+    assert "standalone site brief" in payload["systemInstruction"]["parts"][0]["text"]
 
 
 @pytest.mark.parametrize("updates", [
@@ -142,8 +191,16 @@ def test_direction_and_score_validation(draft):
 
 def test_missing_key_fails_before_network(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="Set GEMINI_API_KEY in the environment"):
+    with pytest.raises(ValueError, match="Set GEMINI_API_KEY in the environment before using Gemini"):
         planner.generate_plan("slope")
+
+
+def test_issue_conversation_requires_key_before_network(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="Set GEMINI_API_KEY in the environment before using Gemini"):
+        planner.reply_to_issue_conversation([
+            {"role": "user", "content": "Explore woodland restoration."},
+        ])
 
 
 def test_explicit_key_is_used_when_environment_is_unset(gemini, monkeypatch):

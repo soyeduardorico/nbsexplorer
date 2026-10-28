@@ -118,6 +118,14 @@
     #status.error { color: #9a342b; background: #f9e9e5; }
     #results { margin-top: 16px; }
     #results p { color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .chat-log { display: grid; max-height: 230px; gap: 8px; margin-top: 8px; padding: 10px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .chat-message { padding: 8px 10px; border-radius: 6px; background: #f0f2ed; }
+    .chat-message.user { margin-left: 12%; background: var(--mint); }
+    .chat-message strong { display: block; margin-bottom: 4px; color: var(--forest); font-size: 10px; }
+    .chat-message p, .chat-welcome { margin: 0; color: var(--ink); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #chatInput { min-height: 72px; }
+    .chat-actions { margin-top: 2px; }
+    .chat-actions button { min-height: 38px; }
     details { margin-top: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     summary { color: var(--forest); cursor: pointer; font-size: 11px; font-weight: 700; }
     table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 11px; }
@@ -155,9 +163,19 @@
   </div>
   <div id="bbox">…or draw a rectangle on the map.</div>
 
-  <label class="section-label" for="brief"><span class="step">02</span>Describe the NBS you want to test</label>
-  <textarea id="brief" rows="5" maxlength="10000" placeholder="e.g. Identify candidate areas for native woodland restoration"></textarea>
-  <small>The brief and selected bounds are sent to Google Gemini. Screening only, not an engineering or ecological feasibility assessment.</small>
+  <label class="section-label"><span class="step">02</span>Discuss the issue</label>
+  <div id="conversation" class="chat-log" aria-live="polite">
+    <p id="chatWelcome" class="chat-welcome">Describe the issue you are exploring. The conversation will keep its context as you clarify goals, constraints and open questions.</p>
+  </div>
+  <textarea id="chatInput" rows="3" maxlength="4000" placeholder="What issue or opportunity would you like to explore?"></textarea>
+  <div class="row chat-actions">
+    <button id="sendChatBtn">Send</button>
+    <button id="newChatBtn" class="secondary">Start new discussion</button>
+  </div>
+  <button id="summarizeBtn" class="secondary" disabled>Summarize conclusion for screening</button>
+  <label class="section-label" for="brief">Screening brief (review or edit)</label>
+  <textarea id="brief" rows="4" maxlength="10000" placeholder="Summarize the discussion to continue to plan generation"></textarea>
+  <small>The discussion and, later, the selected bounds are sent to Google Gemini. Review the brief before generating a plan. Screening is not an engineering or ecological feasibility assessment.</small>
 
   <label class="section-label"><span class="step">03</span>Parameters</label>
   <div class="row">
@@ -189,7 +207,7 @@ const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
   { attribution: '&copy; OpenStreetMap contributors', maxZoom: 19 }).addTo(map);
 const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   { attribution: 'Esri World Imagery', maxZoom: 19 });
-const layerControl = L.control.layers({ 'OpenStreetMap': osm, 'Satellite': sat }, {}, { collapsed: false }).addTo(map);
+const layerControl = L.control.layers({ 'OpenStreetMap': osm, 'Satellite': sat }, {}, { collapsed: true }).addTo(map);
 
 const drawn = new L.FeatureGroup().addTo(map);
 map.addControl(new L.Control.Draw({
@@ -198,6 +216,7 @@ map.addControl(new L.Control.Draw({
 }));
 
 let aoi = null, overlays = [], lastGeojson = null, reviewedRequest = null, revision = 0;
+let conversation = [], chatBusy = false;
 const $ = id => document.getElementById(id);
 const status = (msg, err) => { $('status').textContent = msg; $('status').className = err ? 'error' : ''; };
 
@@ -207,7 +226,104 @@ function invalidatePlan() {
   $('approveBtn').hidden = true;
   $('planDetails').hidden = true;
 }
-$('panel').addEventListener('input', e => { if (e.target.id !== 'diagnostics') invalidatePlan(); });
+$('panel').addEventListener('input', e => {
+  if (!['diagnostics', 'chatInput'].includes(e.target.id)) invalidatePlan();
+});
+
+function renderConversation() {
+  const log = $('conversation');
+  log.replaceChildren();
+  if (!conversation.length) {
+    const welcome = document.createElement('p');
+    welcome.className = 'chat-welcome';
+    welcome.textContent = 'Describe the issue you are exploring. The conversation will keep its context as you clarify goals, constraints and open questions.';
+    log.append(welcome);
+  }
+  for (const message of conversation) {
+    const item = document.createElement('div');
+    item.className = `chat-message ${message.role}`;
+    const label = document.createElement('strong');
+    label.textContent = message.role === 'user' ? 'You' : 'NATALIE';
+    const text = document.createElement('p');
+    text.textContent = message.content;
+    item.append(label, text);
+    log.append(item);
+  }
+  log.scrollTop = log.scrollHeight;
+  $('summarizeBtn').disabled = chatBusy || conversation.length === 0;
+}
+
+async function requestConversation(summarize = false) {
+  if (chatBusy || !conversation.length) return;
+  const lastMessage = conversation[conversation.length - 1];
+  const pendingText = lastMessage.role === 'user' ? lastMessage.content : '';
+  chatBusy = true;
+  $('sendChatBtn').disabled = true;
+  $('newChatBtn').disabled = true;
+  $('summarizeBtn').disabled = true;
+  status(summarize ? 'Summarizing the discussion…' : 'Thinking…');
+  try {
+    const r = await fetch('/api/conversation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: conversation, summarize }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+    if (summarize) {
+      $('brief').value = data.reply;
+      invalidatePlan();
+      status('Review or edit the conclusion, then generate a screening plan.');
+    } else {
+      conversation.push({ role: 'assistant', content: data.reply });
+      renderConversation();
+      status('');
+    }
+  } catch (e) {
+    if (!summarize && pendingText) {
+      conversation.pop();
+      $('chatInput').value = pendingText;
+      renderConversation();
+    }
+    status(e.message, true);
+  } finally {
+    chatBusy = false;
+    $('sendChatBtn').disabled = false;
+    $('newChatBtn').disabled = false;
+    $('summarizeBtn').disabled = conversation.length === 0;
+  }
+}
+
+$('sendChatBtn').onclick = () => {
+  const content = $('chatInput').value.trim();
+  if (!content) return status('Enter a message to continue the discussion.', true);
+  if (conversation.length >= 40) return status('This discussion reached its limit. Summarize it or start a new discussion.', true);
+  const contextLength = conversation.reduce((total, message) => total + message.content.length, 0);
+  if (contextLength + content.length > 30000)
+    return status('This discussion is too long to continue. Summarize it or start a new discussion.', true);
+  conversation.push({ role: 'user', content });
+  $('chatInput').value = '';
+  $('brief').value = '';
+  invalidatePlan();
+  renderConversation();
+  requestConversation();
+};
+$('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    $('sendChatBtn').click();
+  }
+});
+$('newChatBtn').onclick = () => {
+  if (conversation.length && !window.confirm('Start a new discussion and clear its current context?')) return;
+  conversation = [];
+  $('chatInput').value = '';
+  $('brief').value = '';
+  invalidatePlan();
+  renderConversation();
+  status('');
+};
+$('summarizeBtn').onclick = () => requestConversation(true);
 
 function setAoi(bounds) {
   invalidatePlan();
@@ -253,7 +369,7 @@ function clearOverlays() {
 $('runBtn').onclick = async () => {
   if (!aoi) return status('Select an area first', true);
   const brief = $('brief').value.trim();
-  if (!brief) return status('Describe the NBS you want to test', true);
+  if (!brief) return status('Discuss the issue and provide a screening brief first', true);
   invalidatePlan();
   const requestRevision = revision;
   const body = {

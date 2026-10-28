@@ -3,8 +3,9 @@
 Start the app, open http://127.0.0.1:8000, and:
 
 1. Search for a place or draw/edit a rectangular area on the map.
-2. Enter the NBS brief and optionally change the resolution and dates. Tick
-   **Diagnostic mode** to inspect how the plan was applied (see below).
+2. Discuss the issue with Gemini, then click **Summarize conclusion for screening**.
+   Review or edit the resulting screening brief and optionally change the resolution and dates.
+   Tick **Diagnostic mode** to inspect how the plan was applied (see below).
 3. Click **Generate screening plan**. Gemini 3.1 Flash-Lite proposes the required layers
    and criteria using the existing planner.
 4. Review the criteria, assumptions, unanswered questions and limitations, then click
@@ -23,6 +24,7 @@ layer and a "Criterion N" overlay for each criterion (green = pixels passing tha
 criterion on its own; score criteria show their 0–1 score), plus a table of the area
 passing each criterion. Use it to check that Gemini picked sensible layers and limits.
 Editing the brief, area or parameters requires generating and reviewing a new plan.
+The discussion context is held in the current page; **Start new discussion** clears it.
 The web workflow does not save GeoTIFFs or run directories; use the command-line runner below
 if those are needed. `/api/analyze` only accepts a reviewed plan; the old fixed-cutoff
 layer combiner and `/api/layers` have been removed.
@@ -36,10 +38,13 @@ The planner proposes an NBS screening plan. The separate plan runner can downloa
 required Earth Engine rasters, apply the plan's hard masks and weighted scores, and save
 georeferenced screening outputs. Neither workflow certifies engineering/ecological feasibility.
 
-1. Set the `GEMINI_API_KEY` environment variable before starting the app. The default
-   `GEMINI_MODEL` is `gemini-3.1-flash-lite`; set `GEMINI_MODEL` to override it.
-   Keep the key in an environment variable or hosting-provider secret, never in source
-   control. The key stays on the backend; it is not sent to the browser.
+1. For local development, create a file named `.env` in the repository root and add your
+   `GEMINI_API_KEY` to it. The app loads this local file automatically.
+   `.env` is ignored by Git; never commit it or share its contents. Render uses the
+   service's Environment settings instead. Process environment values take precedence
+   over `.env`, so the same code works in both places. The default `GEMINI_MODEL` is
+   `gemini-3.1-flash-lite`; set it in `.env` or the hosting environment to override it.
+   The key stays on the backend and is not sent to the browser.
 2. With the project environment activated, run:
 
 ```powershell

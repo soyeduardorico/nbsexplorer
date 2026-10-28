@@ -5,6 +5,7 @@ import datetime as dt
 from http.client import HTTPException as HTTPClientException
 import sys
 from pathlib import Path
+from typing import Literal
 
 # Allow running this file directly (python app/main.py / VS Code Run button),
 # not only as `uvicorn app.main:app`.
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import processing as P
-from app.planner import Plan, generate_plan
+from app.planner import Plan, generate_plan, reply_to_issue_conversation
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 MAX_AREA_KM2 = 25_000
@@ -58,6 +59,38 @@ class PlanRequest(AreaRequest):
         if not value.strip():
             raise ValueError("The NBS brief cannot be empty")
         return value.strip()
+
+
+class ConversationMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("content")
+    @classmethod
+    def _check_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Conversation messages cannot be empty")
+        return value
+
+
+class ConversationRequest(BaseModel):
+    messages: list[ConversationMessage] = Field(min_length=1, max_length=40)
+    summarize: bool = False
+
+    @model_validator(mode="after")
+    def _check_size(self):
+        if sum(len(message.content) for message in self.messages) > 30000:
+            raise ValueError("Conversation is too long; start a new discussion")
+        if self.messages[0].role != "user":
+            raise ValueError("A discussion must start with a user message")
+        if any(
+            self.messages[index - 1].role == message.role
+            for index, message in enumerate(self.messages[1:], start=1)
+        ):
+            raise ValueError("Conversation messages must alternate between user and assistant")
+        if not self.summarize and self.messages[-1].role != "user":
+            raise ValueError("Send a message before requesting a reply")
+        return self
 
 
 class AnalyzeRequest(AreaRequest):
@@ -146,6 +179,18 @@ def plan(req: PlanRequest):
     except (OSError, ValueError, HTTPClientException) as exc:
         raise HTTPException(502, f"Gemini planning error: {exc}") from exc
     return {"plan": draft.model_dump(), "model": model}
+
+
+@app.post("/api/conversation")
+def conversation(req: ConversationRequest):
+    try:
+        reply = reply_to_issue_conversation(
+            [message.model_dump() for message in req.messages],
+            summarize=req.summarize,
+        )
+    except (OSError, ValueError, HTTPClientException) as exc:
+        raise HTTPException(502, f"Gemini conversation error: {exc}") from exc
+    return {"reply": reply}
 
 
 if __name__ == "__main__":

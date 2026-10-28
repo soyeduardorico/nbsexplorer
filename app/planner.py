@@ -154,6 +154,19 @@ you propose is a provisional_assumption, not a user_requirement; list it in assu
 Approval is only approval of a draft for further review, never permission to execute.
 """
 
+CONVERSATION_PROMPT = """You help a user clarify an issue they want to explore with nature-based
+solutions. Have a focused, conversational discussion and use the earlier messages as context.
+Ask concise follow-up questions when important details are missing, such as the goal, location,
+constraints, priorities, and what the user already knows. Do not invent site facts, measurements,
+thresholds, or evidence, and do not claim that screening establishes feasibility or safety.
+"""
+
+SUMMARY_PROMPT = """Summarize the conversation as a concise, standalone site brief for an NBS
+screening plan. Preserve the user's stated goals and constraints, and clearly identify unresolved
+questions or provisional assumptions. Do not invent facts, thresholds, or evidence. Return only
+the brief text, without a heading or commentary.
+"""
+
 
 def gemini_json(model: str, payload: dict, api_key: str, timeout: float) -> dict:
     """Call Google's fixed HTTPS endpoint; keep the key out of URLs and output."""
@@ -184,6 +197,59 @@ def gemini_json(model: str, payload: dict, api_key: str, timeout: float) -> dict
         connection.close()
 
 
+def reply_to_issue_conversation(
+    messages: list[dict[str, str]],
+    summarize: bool = False,
+    model: str | None = None,
+    timeout: float = 120,
+    api_key: str | None = None,
+) -> str:
+    if not messages:
+        raise ValueError("The conversation cannot be empty")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Timeout must be a positive finite number")
+    api_key = (api_key or os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("Set GEMINI_API_KEY in the environment before using Gemini.")
+    model = model or os.environ.get("GEMINI_MODEL") or config.GEMINI_MODEL
+
+    contents = [
+        {
+            "role": "model" if message["role"] == "assistant" else "user",
+            "parts": [{"text": message["content"]}],
+        }
+        for message in messages
+    ]
+    if summarize:
+        contents.append({
+            "role": "user",
+            "parts": [{"text": "Summarize our discussion into the requested screening brief."}],
+        })
+    response = gemini_json(model, {
+        "systemInstruction": {
+            "parts": [{"text": SUMMARY_PROMPT if summarize else CONVERSATION_PROMPT}]
+        },
+        "contents": contents,
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+    }, api_key, timeout)
+    choices = response.get("candidates")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("Gemini returned no conversation response (the request may have been blocked)")
+    choice = choices[0]
+    if choice.get("finishReason") != "STOP":
+        raise ValueError(f"Gemini completion did not finish normally: {choice.get('finishReason')}")
+    content = choice.get("content")
+    if not isinstance(content, dict) or not isinstance(content.get("parts"), list):
+        raise ValueError("Gemini returned no conversation text")
+    text = "".join(
+        part["text"] for part in content["parts"]
+        if isinstance(part, dict) and isinstance(part.get("text"), str) and not part.get("thought")
+    ).strip()
+    if not text:
+        raise ValueError("Gemini returned an empty conversation response")
+    return text
+
+
 def generate_plan(
     brief: str,
     model: str | None = None,
@@ -196,7 +262,7 @@ def generate_plan(
         raise ValueError("Timeout must be a positive finite number")
     api_key = (api_key or os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
-        raise ValueError("Set GEMINI_API_KEY in the environment before planning.")
+        raise ValueError("Set GEMINI_API_KEY in the environment before using Gemini.")
     model = model or os.environ.get("GEMINI_MODEL") or config.GEMINI_MODEL
     context = {
         "brief": brief,
